@@ -16,6 +16,10 @@ from typing import DefaultDict
 
 import numpy as np
 
+import networkx as nx
+from networkx.utils import pairwise
+
+import math
 
 INT_MAX = 2147483647
 
@@ -25,9 +29,14 @@ class CollectCoinThread(threading.Thread):
     def __init__(self, screen):
         super().__init__()
         self.screen = screen
-        self.COIN_THRESHOLD = 2
+        self.MONSTER_PENALTY = 1.2
+        self.FIRE_PENALTY = 1.5
+        self.SAFETY_THRESHOLD = 0.2
+        self.PLAYER_HEALTH_THRESHOLD = 0.7
 
-    def create_tsp_matrix(self, start_pos, coin_pos, monster_pos, fire_pos):
+    def create_tsp_matrix(self, start_pos):
+
+        coin_pos, monster_pos, fire_pos = position_func_v3()
 
         num_nodes = len(coin_pos) + 1
         tsp_matrix = [[0] * num_nodes for _ in range(num_nodes)]
@@ -43,23 +52,17 @@ class CollectCoinThread(threading.Thread):
                 else:
                     tsp_matrix[ii][jj] = self._get_euclidean_distance(
                         coin_pos[ii-1], coin_pos[jj-1])
-                    tsp_matrix[ii][jj] += self._get_penalty(
-                        monster_pos, coin_pos[jj-1], threat_type="monster")
-                    tsp_matrix[ii][jj] += self._get_penalty(
-                        fire_pos, coin_pos[jj-1], threat_type="fire")
+                    tsp_matrix[ii][jj] += self.get_weighted_penalty(
+                        coin_pos[jj-1], monster_pos, fire_pos)
 
         return tsp_matrix
 
-    def update_tsp_matrix(self, tsp_matrix, start_pos, coin_pos, monster_pos, fire_pos):
-        new_tsp = self.create_tsp_matrix(
-            start_pos, coin_pos, monster_pos, fire_pos)
-
-        return new_tsp
-
-    def get_minimum_route(self, tsp_matrix, coin_pos, monster_pos, fire_pos):
+    def get_minimum_route(self, tsp_matrix):
         '''
         use Nearest Neighbours to calculate minimum route
         '''
+
+        coin_pos, monster_pos, fire_pos = position_func_v3()
 
         num_nodes = len(tsp_matrix)
 
@@ -77,12 +80,10 @@ class CollectCoinThread(threading.Thread):
             for ii in range(num_nodes):
                 if not visited[ii]:
                     distance = tsp_matrix[curr_node][ii]
-                    penalty_monster = self._get_penalty(
-                        monster_pos, coin_pos[ii - 1], threat_type="monster")
-                    penalty_fire = self._get_penalty(
-                        fire_pos, coin_pos[ii - 1], threat_type="fire"
-                    )
-                    total_cost = distance + penalty_monster + penalty_fire
+                    weighted_penalty = self.get_weighted_penalty(
+                        coin_pos[ii-1], monster_pos, fire_pos)
+
+                    total_cost = distance + weighted_penalty
 
                     if total_cost < min_cost:
                         nearest_node = ii
@@ -107,71 +108,146 @@ class CollectCoinThread(threading.Thread):
             distance = self._get_euclidean_distance(coin_pos, threat)
 
             if threat_type == "fire":
-                penalty = 2 / (distance + 1e-5)  # avoid division by zero
+                penalty = 5 / (distance + 1e-5)  # avoid division by zero
             else:
-                penalty = 1 / (distance + 1e-5)
+                penalty = 2 / (distance + 1e-5)
             total_penalty += penalty
 
         return total_penalty
 
+    def get_weighted_penalty(self, curr_pos, monster_pos, fire_pos):
+
+        fire_penalty = 0
+
+        monster_penalty = self._get_penalty(
+            monster_pos, curr_pos, threat_type="monster")
+
+        if fire_pos is not None:
+            fire_penalty = self._get_penalty(
+                fire_pos, curr_pos, threat_type="fire")
+
+        weighted_penalty = self.MONSTER_PENALTY * \
+            monster_penalty + self.FIRE_PENALTY * fire_penalty
+
+        return weighted_penalty
+
+    def get_safe_pos(self, start_pos):
+
+        MOVE_FACTOR = 0.05
+
+        _, monster_pos, fire_pos = position_func_v3()
+
+        candidate_pos = [
+            (start_pos[0] + MOVE_FACTOR, start_pos[1]),
+            (start_pos[0] - MOVE_FACTOR, start_pos[1]),
+            (start_pos[0] + MOVE_FACTOR, start_pos[1] + MOVE_FACTOR),
+            (start_pos[0] + MOVE_FACTOR, start_pos[1] - MOVE_FACTOR),
+            (start_pos[0] - MOVE_FACTOR, start_pos[1] + MOVE_FACTOR),
+            (start_pos[0] - MOVE_FACTOR, start_pos[1] - MOVE_FACTOR),
+            (start_pos[0], start_pos[1] + MOVE_FACTOR),
+            (start_pos[0], start_pos[1] - MOVE_FACTOR)
+        ]
+
+        min_penalty = float("inf")
+        safe_position = start_pos
+
+        for pos in candidate_pos:
+            weighted_penalty = self.get_weighted_penalty(
+                pos, monster_pos, fire_pos)
+
+            if weighted_penalty < min_penalty:
+                if pos[0] >= 0 and pos[0] <= 1 and pos[1] >= 0 and pos[1] <= 1:
+                    min_penalty = weighted_penalty
+                    safe_position = pos
+
+        return safe_position
+
     def run(self):
+        start_time = time.time()
         start_pos = [0.1, 0.1]
         app.start_char_animation(lvl_num, start_pos)
         coin_pos, monster_pos, fire_pos = position_func_v3()
-        # print(f"MONSTER POSITIONS: {monster_pos}")
         num_coins = len(coin_pos)
         tsp = self.create_tsp_matrix(
-            start_pos=start_pos, coin_pos=coin_pos, monster_pos=monster_pos, fire_pos=fire_pos)
-        route = self.get_minimum_route(tsp, coin_pos, monster_pos, fire_pos)
+            start_pos=start_pos)
+        route = self.get_minimum_route(tsp)
+
+        init_coins = num_coins
 
         while num_coins > 0:
+
+            risk_factor = 0.1
 
             move_made = False
 
             next_coin_idx = route[1] - 1
             next_coin_pos = coin_pos[next_coin_idx]
 
-            if num_coins <= self.COIN_THRESHOLD:
-                safety_threshold = 0.3
+            if num_coins <= init_coins * self.SAFETY_THRESHOLD:
+                safety_threshold = 0.8
             else:
-                safety_threshold = 0.1
+                safety_threshold = 0.3
+
+            remaining_health = app.get_player_health(lvl_num)
+
+            if remaining_health <= self.PLAYER_HEALTH_THRESHOLD:
+                risk_factor = remaining_health
+            else:
+                risk_factor = 1.5
+
+            stalling_penalty = 0
+            stall_counter = 0
 
             while move_made == False:
 
+                if app.damage_check(lvl_num) == True:
+                    print(f"before hit: {start_pos}")
+                    new_pos = self.get_safe_pos(start_pos)
+                    print("after hit: ", new_pos)
+                    app.start_char_animation(lvl_num, new_pos)
+                    start_pos = new_pos
+
+                tsp = self.create_tsp_matrix(
+                    start_pos=start_pos)
+                route = self.get_minimum_route(
+                    tsp)
+                next_coin_idx = route[1] - 1
+                next_coin_pos = coin_pos[next_coin_idx]
+
                 coin_pos, monster_pos, fire_pos = position_func_v3()
 
-                curr_threat_monster = self._get_penalty(
-                    monster_pos, start_pos, threat_type="monster")
-                curr_threat_fire = self._get_penalty(
-                    fire_pos, start_pos, threat_type="fire")
-                future_threat_monster = self._get_penalty(
-                    monster_pos, next_coin_pos, threat_type="monster")
-                future_threat_fire = self._get_penalty(
-                    fire_pos, next_coin_pos, threat_type="fire")
+                weighted_curr_threat = self.get_weighted_penalty(
+                    start_pos, monster_pos, fire_pos)
+                weighted_future_threat = self.get_weighted_penalty(
+                    next_coin_pos, monster_pos, fire_pos)
 
-                weighted_curr_threat = curr_threat_monster + curr_threat_fire
-                weighted_future_threat = future_threat_monster + future_threat_fire
-
-                if weighted_future_threat * safety_threshold < weighted_curr_threat:
+                if weighted_future_threat * safety_threshold < weighted_curr_threat + stalling_penalty:
                     move_made = True
 
-            app.start_char_animation(lvl_num, next_coin_pos)
-            time.sleep(0.4)
+                if stall_counter > 1:
+                    print(f"stall counter: {stall_counter}")
+                    time.sleep(0.025)
 
-            print(f"coin_pos: {coin_pos}")
+                stalling_penalty += risk_factor
+
+                stall_counter += 1
+
+            app.start_char_animation(lvl_num, next_coin_pos)
+            time.sleep(0.3)
 
             coin_pos, monster_pos, fire_pos = position_func_v3()
 
             num_coins = len(coin_pos)
 
-            print(f"num_coins: {num_coins}")
-
             tsp = self.create_tsp_matrix(
-                next_coin_pos, coin_pos, monster_pos, fire_pos)
+                next_coin_pos)
             route = self.get_minimum_route(
-                tsp, coin_pos, monster_pos, fire_pos)
+                tsp)
 
             start_pos = next_coin_pos
+
+        end_time = time.time()
+        print(f"execution time: {end_time - start_time}")
 
 
 def position_func_v3():  # added by Kit 03 July 2023
@@ -427,14 +503,14 @@ class CointexApp(kivy.app.App):
         screen_num = int(character_image.parent.parent.name[5:])
         character_center = character_image.center
 
-        gab_x = character_image.width / 3
-        gab_y = character_image.height / 3
+        gab_x = character_image.width * 2
+        gab_y = character_image.height * 2
         coins_to_delete = []
         curr_screen = self.root.screens[screen_num]
 
         for coin_key, curr_coin in curr_screen.coins_ids.items():
             curr_coin_center = curr_coin.center
-            if character_image.collide_widget(curr_coin) and abs(character_center[0] - curr_coin_center[0]) <= gab_x and abs(character_center[1] - curr_coin_center[1]) <= gab_y:
+            if character_image.collide_widget(curr_coin) and abs(character_center[0] - curr_coin_center[0]) <= gab_x / 2 and abs(character_center[1] - curr_coin_center[1]) <= gab_y / 2:
                 self.coin_sound.play()
                 coins_to_delete.append(coin_key)
                 curr_screen.ids['layout_lvl' +
@@ -525,6 +601,48 @@ class CointexApp(kivy.app.App):
                 char_anim.start(character_image)
                 kivy.clock.Clock.schedule_once(functools.partial(
                     self.back_to_main_screen, curr_screen.parent), 3)
+
+    def damage_check(self, screen_num):
+        curr_screen = self.root.screens[screen_num]
+        character_img = curr_screen.ids["character_image_lvl" +
+                                        str(screen_num)]
+
+        for monster in range(curr_screen.num_monsters):
+            monster_img = curr_screen.ids["monster" +
+                                          str(monster + 1) + "_image_lvl" + str(screen_num)]
+
+            character_center = character_img.center
+            monster_center = monster_img.center
+
+            gab_x = character_img.width * 1.5
+            gab_y = character_img.height * 1.5
+
+            if character_img.collide_widget(monster_img) and abs(character_center[0] - monster_center[0]) <= gab_x and abs(character_center[1] - monster_center[1]) <= gab_y:
+                return True
+
+        for fire in range(curr_screen.num_fires):
+
+            fire_widget = curr_screen.ids["fire" +
+                                          str(fire + 1) + "_lvl" + str(screen_num)]
+            fire_center = fire_widget.center
+
+            character_center = character_img.center
+
+            gab_x = character_img.width
+            gab_y = character_img.height
+
+            if character_img.collide_widget(fire_widget) and abs(character_center[0] - fire_center[0]) <= gab_x and abs(character_center[1] - fire_center[1]) <= gab_y:
+                return True
+
+        return False
+
+    def get_player_health(self, screen_num):
+        curr_screen = self.root.screens[screen_num]
+
+        player_health = 1 - (float(curr_screen.num_collisions_hit) /
+                             float(curr_screen.num_collisions_level))
+
+        return player_health
 
     def back_to_main_screen(self, screenManager, *args):
         screenManager.current = "main"
