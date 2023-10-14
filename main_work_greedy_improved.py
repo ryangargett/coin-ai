@@ -32,7 +32,6 @@ class CollectCoinThread(threading.Thread):
         self.MONSTER_PENALTY = 1.2
         self.FIRE_PENALTY = 1.5
         self.SAFETY_THRESHOLD = 0.2
-        self.GREEDINESS = 5
         self.PLAYER_HEALTH_THRESHOLD = 0.7
 
     def create_tsp_matrix(self, start_pos):
@@ -109,7 +108,7 @@ class CollectCoinThread(threading.Thread):
             distance = self._get_euclidean_distance(coin_pos, threat)
 
             if threat_type == "fire":
-                penalty = 10 / (distance + 1e-5)  # avoid division by zero
+                penalty = 5 / (distance + 1e-5)  # avoid division by zero
             else:
                 penalty = 2 / (distance + 1e-5)
             total_penalty += penalty
@@ -134,7 +133,7 @@ class CollectCoinThread(threading.Thread):
 
     def get_safe_pos(self, start_pos):
 
-        MOVE_FACTOR = 0.1
+        MOVE_FACTOR = 0.05
 
         _, monster_pos, fire_pos = position_func_v3()
 
@@ -157,55 +156,11 @@ class CollectCoinThread(threading.Thread):
                 pos, monster_pos, fire_pos)
 
             if weighted_penalty < min_penalty:
-                min_penalty = weighted_penalty
-                safe_position = pos
+                if pos[0] >= 0 and pos[0] <= 1 and pos[1] >= 0 and pos[1] <= 1:
+                    min_penalty = weighted_penalty
+                    safe_position = pos
 
         return safe_position
-
-    def get_safe_path(self, start_pos, next_coin_pos):
-
-        SCALE_FACTOR = 8
-        GRID_SIZE = 10
-
-        start_pos_scaled = (
-            int(start_pos[0] * SCALE_FACTOR), int(start_pos[1] * SCALE_FACTOR))
-        next_coin_pos_scaled = (
-            int(next_coin_pos[0] * SCALE_FACTOR), int(next_coin_pos[1] * SCALE_FACTOR))
-
-        for x, y in start_pos_scaled:
-            if x > GRID_SIZE:
-                x = GRID_SIZE
-            if y > GRID_SIZE:
-                y = GRID_SIZE
-
-        _, monster_pos, fire_pos = position_func_v3()
-
-        monster_pos_scaled = [
-            (int(x * SCALE_FACTOR), int(y * SCALE_FACTOR)) for x, y in monster_pos]
-        fire_pos_scaled = [(int(x * SCALE_FACTOR), int(y * SCALE_FACTOR))
-                           for x, y in fire_pos]
-
-        game_grid = np.zeros((GRID_SIZE, GRID_SIZE))
-
-        Graph = nx.grid_2d_graph(len(game_grid), len(game_grid[0]))
-
-        for u, v in Graph.edges():
-            Graph[u][v]['weight'] = self.get_weighted_penalty(
-                v, monster_pos_scaled, fire_pos_scaled)
-
-        try:
-            path = nx.astar_path(
-                Graph, start_pos_scaled, next_coin_pos_scaled, heuristic=self.greedy_heuristic)
-            path_unscaled = [(x / SCALE_FACTOR, y / SCALE_FACTOR)
-                             for x, y in path]
-
-            return path_unscaled
-        except nx.exception.NetworkXNoPath:
-            return None
-
-    def greedy_heuristic(self, node, goal):
-        heuristic = self._get_euclidean_distance(node, goal) * self.GREEDINESS
-        return heuristic
 
     def run(self):
         start_time = time.time()
@@ -221,6 +176,8 @@ class CollectCoinThread(threading.Thread):
 
         while num_coins > 0:
 
+            risk_factor = 0.1
+
             move_made = False
 
             next_coin_idx = route[1] - 1
@@ -231,20 +188,31 @@ class CollectCoinThread(threading.Thread):
             else:
                 safety_threshold = 0.3
 
-            stall_time = 0
+            remaining_health = app.get_player_health(lvl_num)
+
+            if remaining_health <= self.PLAYER_HEALTH_THRESHOLD:
+                risk_factor = remaining_health
+            else:
+                risk_factor = 1.5
+
+            stalling_penalty = 0
+            stall_counter = 0
 
             while move_made == False:
 
                 if app.damage_check(lvl_num) == True:
+                    print(f"before hit: {start_pos}")
                     new_pos = self.get_safe_pos(start_pos)
+                    print("after hit: ", new_pos)
                     app.start_char_animation(lvl_num, new_pos)
                     start_pos = new_pos
-                    tsp = self.create_tsp_matrix(
-                        start_pos=start_pos)
-                    route = self.get_minimum_route(
-                        tsp)
-                    next_coin_idx = route[1] - 1
-                    next_coin_pos = coin_pos[next_coin_idx]
+
+                tsp = self.create_tsp_matrix(
+                    start_pos=start_pos)
+                route = self.get_minimum_route(
+                    tsp)
+                next_coin_idx = route[1] - 1
+                next_coin_pos = coin_pos[next_coin_idx]
 
                 coin_pos, monster_pos, fire_pos = position_func_v3()
 
@@ -253,29 +221,16 @@ class CollectCoinThread(threading.Thread):
                 weighted_future_threat = self.get_weighted_penalty(
                     next_coin_pos, monster_pos, fire_pos)
 
-                if weighted_future_threat * safety_threshold < weighted_curr_threat:
+                if weighted_future_threat * safety_threshold < weighted_curr_threat + stalling_penalty:
                     move_made = True
 
-                if stall_time == 5:
-                    move_made = True
+                if stall_counter > 1:
+                    print(f"stall counter: {stall_counter}")
+                    time.sleep(0.025)
 
-                stall_time += 1
+                stalling_penalty += risk_factor
 
-            if app.get_player_health(lvl_num) < self.PLAYER_HEALTH_THRESHOLD:
-
-                safe_path = self.get_safe_path(start_pos, next_coin_pos)
-
-                for step in safe_path:
-                    app.start_char_animation(lvl_num, step)
-                    start_pos = step
-
-                    tsp = self.create_tsp_matrix(
-                        start_pos=start_pos)
-                    route = self.get_minimum_route(
-                        tsp)
-                    next_coin_idx = route[1] - 1
-                    next_coin_pos = coin_pos[next_coin_idx]
-                    safe_path = self.get_safe_path(step, next_coin_pos)
+                stall_counter += 1
 
             app.start_char_animation(lvl_num, next_coin_pos)
             time.sleep(0.3)
@@ -555,7 +510,7 @@ class CointexApp(kivy.app.App):
 
         for coin_key, curr_coin in curr_screen.coins_ids.items():
             curr_coin_center = curr_coin.center
-            if character_image.collide_widget(curr_coin) and abs(character_center[0] - curr_coin_center[0]) <= gab_x and abs(character_center[1] - curr_coin_center[1]) <= gab_y:
+            if character_image.collide_widget(curr_coin) and abs(character_center[0] - curr_coin_center[0]) <= gab_x / 2 and abs(character_center[1] - curr_coin_center[1]) <= gab_y / 2:
                 self.coin_sound.play()
                 coins_to_delete.append(coin_key)
                 curr_screen.ids['layout_lvl' +
