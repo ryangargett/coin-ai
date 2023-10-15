@@ -7,7 +7,6 @@ import os
 import functools
 import kivy.uix.behaviors
 import pickle
-import pygad
 import threading
 import kivy.base
 import random
@@ -15,9 +14,6 @@ import time
 from typing import DefaultDict
 
 import numpy as np
-
-import networkx as nx
-from networkx.utils import pairwise
 
 import math
 
@@ -29,10 +25,12 @@ class CollectCoinThread(threading.Thread):
     def __init__(self, screen):
         super().__init__()
         self.screen = screen
-        self.MONSTER_PENALTY = 1.2
-        self.FIRE_PENALTY = 1.5
+        self.MONSTER_PENALTY = 1.5
+        self.FIRE_PENALTY = 2
         self.SAFETY_THRESHOLD = 0.2
         self.PLAYER_HEALTH_THRESHOLD = 0.7
+        self.GREEDY_COLLECT_THRESHOLD = 0.15
+        self.CRITICAL_HEALTH_THRESHOLD = 0.5
 
     def create_tsp_matrix(self, start_pos):
 
@@ -80,8 +78,12 @@ class CollectCoinThread(threading.Thread):
             for ii in range(num_nodes):
                 if not visited[ii]:
                     distance = tsp_matrix[curr_node][ii]
-                    weighted_penalty = self.get_weighted_penalty(
-                        coin_pos[ii-1], monster_pos, fire_pos)
+
+                    if ii - 1 < len(coin_pos):
+                        weighted_penalty = self.get_weighted_penalty(
+                            coin_pos[ii-1], monster_pos, fire_pos)
+                    else:
+                        weighted_penalty = 0
 
                     total_cost = distance + weighted_penalty
 
@@ -131,29 +133,38 @@ class CollectCoinThread(threading.Thread):
 
         return weighted_penalty
 
-    def get_safe_pos(self, start_pos):
-
-        MOVE_FACTOR = 0.05
+    def get_safe_pos(self, start_pos, epsilon=0.1, move_factor=0.05):
 
         _, monster_pos, fire_pos = position_func_v3()
 
         candidate_pos = [
-            (start_pos[0] + MOVE_FACTOR, start_pos[1]),
-            (start_pos[0] - MOVE_FACTOR, start_pos[1]),
-            (start_pos[0] + MOVE_FACTOR, start_pos[1] + MOVE_FACTOR),
-            (start_pos[0] + MOVE_FACTOR, start_pos[1] - MOVE_FACTOR),
-            (start_pos[0] - MOVE_FACTOR, start_pos[1] + MOVE_FACTOR),
-            (start_pos[0] - MOVE_FACTOR, start_pos[1] - MOVE_FACTOR),
-            (start_pos[0], start_pos[1] + MOVE_FACTOR),
-            (start_pos[0], start_pos[1] - MOVE_FACTOR)
+            (start_pos[0] + move_factor, start_pos[1]),
+            (start_pos[0] - move_factor, start_pos[1]),
+            (start_pos[0] + move_factor, start_pos[1] + move_factor),
+            (start_pos[0] + move_factor, start_pos[1] - move_factor),
+            (start_pos[0] - move_factor, start_pos[1] + move_factor),
+            (start_pos[0] - move_factor, start_pos[1] - move_factor),
+            (start_pos[0], start_pos[1] + move_factor),
+            (start_pos[0], start_pos[1] - move_factor)
         ]
 
-        min_penalty = float("inf")
-        safe_position = start_pos
+        x = random.random()
 
-        for pos in candidate_pos:
-            weighted_penalty = self.get_weighted_penalty(
-                pos, monster_pos, fire_pos)
+        if x <= epsilon:
+
+            valid_positions = [pos for pos in candidate_pos if pos[0]
+                               >= 0 and pos[0] <= 1 and pos[1] >= 0 and pos[1] <= 1]
+            random_position = random.choice(valid_positions)
+            safe_position = random_position
+
+        else:
+
+            min_penalty = float('inf')
+            safe_position = start_pos
+
+            for pos in candidate_pos:
+                weighted_penalty = self.get_weighted_penalty(
+                    pos, monster_pos, fire_pos)
 
             if weighted_penalty < min_penalty:
                 if pos[0] >= 0 and pos[0] <= 1 and pos[1] >= 0 and pos[1] <= 1:
@@ -201,9 +212,9 @@ class CollectCoinThread(threading.Thread):
             while move_made == False:
 
                 if app.damage_check(lvl_num) == True:
-                    print(f"before hit: {start_pos}")
-                    new_pos = self.get_safe_pos(start_pos)
-                    print("after hit: ", new_pos)
+                    new_pos = self.get_safe_pos(
+                        start_pos, epsilon=0, move_factor=0.1)
+                    print(f"damage taken, moving to: {new_pos}")
                     app.start_char_animation(lvl_num, new_pos)
                     start_pos = new_pos
 
@@ -216,23 +227,43 @@ class CollectCoinThread(threading.Thread):
 
                 coin_pos, monster_pos, fire_pos = position_func_v3()
 
-                weighted_curr_threat = self.get_weighted_penalty(
-                    start_pos, monster_pos, fire_pos)
-                weighted_future_threat = self.get_weighted_penalty(
-                    next_coin_pos, monster_pos, fire_pos)
+                remaining_health = app.get_player_health(lvl_num)
 
-                if weighted_future_threat * safety_threshold < weighted_curr_threat + stalling_penalty:
+                if num_coins > math.ceil(self.GREEDY_COLLECT_THRESHOLD * init_coins) or remaining_health <= self.CRITICAL_HEALTH_THRESHOLD:
+
+                    weighted_curr_threat = self.get_weighted_penalty(
+                        start_pos, monster_pos, fire_pos)
+                    weighted_future_threat = self.get_weighted_penalty(
+                        next_coin_pos, monster_pos, fire_pos)
+
+                    if weighted_future_threat * safety_threshold < weighted_curr_threat + stalling_penalty:
+                        move_made = True
+
+                    if stall_counter > 1:
+                        print(f"stall counter: {stall_counter}")
+                        new_pos = self.get_safe_pos(
+                            start_pos, move_factor=0.05)
+                        app.start_char_animation(lvl_num, new_pos)
+                        start_pos = new_pos
+
+                    stalling_penalty += risk_factor * \
+                        math.log(max(1, stall_counter))
+
+                    stall_counter += 1
+
+                else:
+                    print("Taking risky move to collect coins")
                     move_made = True
 
-                if stall_counter > 1:
-                    print(f"stall counter: {stall_counter}")
-                    time.sleep(0.025)
-
-                stalling_penalty += risk_factor
-
-                stall_counter += 1
-
             app.start_char_animation(lvl_num, next_coin_pos)
+
+            if app.damage_check(lvl_num) == True:
+                new_pos = self.get_safe_pos(
+                    start_pos, epsilon=0, move_factor=0.1)
+                print(f"damage taken, moving to: {new_pos}")
+                app.start_char_animation(lvl_num, new_pos)
+                start_pos = new_pos
+
             time.sleep(0.3)
 
             coin_pos, monster_pos, fire_pos = position_func_v3()
@@ -503,14 +534,14 @@ class CointexApp(kivy.app.App):
         screen_num = int(character_image.parent.parent.name[5:])
         character_center = character_image.center
 
-        gab_x = character_image.width * 2
-        gab_y = character_image.height * 2
+        gab_x = character_image.width / 2
+        gab_y = character_image.height / 2
         coins_to_delete = []
         curr_screen = self.root.screens[screen_num]
 
         for coin_key, curr_coin in curr_screen.coins_ids.items():
             curr_coin_center = curr_coin.center
-            if character_image.collide_widget(curr_coin) and abs(character_center[0] - curr_coin_center[0]) <= gab_x / 2 and abs(character_center[1] - curr_coin_center[1]) <= gab_y / 2:
+            if character_image.collide_widget(curr_coin) and abs(character_center[0] - curr_coin_center[0]) <= gab_x and abs(character_center[1] - curr_coin_center[1]) <= gab_y:
                 self.coin_sound.play()
                 coins_to_delete.append(coin_key)
                 curr_screen.ids['layout_lvl' +
