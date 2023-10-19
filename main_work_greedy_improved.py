@@ -33,6 +33,16 @@ class CollectCoinThread(threading.Thread):
         self.CRITICAL_HEALTH_THRESHOLD = 0.5
 
     def create_tsp_matrix(self, start_pos):
+        """function to create a Travelling Salesman Matrix given the
+        player's current position
+
+        Args:
+            start_pos (list): the current position of the player on the game screen 
+
+        Returns:
+            tsp_matrix (list): Travelling Salesman Matrix for the player
+            position, and the weighted penalty for each coin
+        """
 
         coin_pos, monster_pos, fire_pos = position_func_v3()
 
@@ -56,9 +66,16 @@ class CollectCoinThread(threading.Thread):
         return tsp_matrix
 
     def get_minimum_route(self, tsp_matrix):
-        '''
-        use Nearest Neighbours to calculate minimum route
-        '''
+        """function to calculate the minimum route to collect coins
+
+        Args:
+            tsp_matrix (list): Travelling Salesman Matrix for the player
+            position, and the weighted penalty for each coin
+
+        Returns:
+            route (list): calculated order to collect coins whilst minimizing
+            risk from hazards
+        """
 
         coin_pos, monster_pos, fire_pos = position_func_v3()
 
@@ -99,10 +116,26 @@ class CollectCoinThread(threading.Thread):
         return route
 
     def _get_euclidean_distance(self, pos1, pos2):
+        """helper function to calculate Euclidean distance between two positions
+
+        Args:
+            pos1 (list): x and y coordinates of the first position
+            pos2 (list): x and y coordinates of the second position
+
+        Returns:
+            distance (float): Euclidean distance between the two positions
+        """
+
         distance = np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
         return distance
 
     def _get_penalty(self, threat_pos, coin_pos, threat_type):
+        """helper function to get the penalty for a given coin position relative
+        to different threats
+
+        Returns:
+            total_penalty (float): total penalty for the given coin position
+        """
 
         total_penalty = 0
 
@@ -118,6 +151,12 @@ class CollectCoinThread(threading.Thread):
         return total_penalty
 
     def get_weighted_penalty(self, curr_pos, monster_pos, fire_pos):
+        """function that returns the penalty of a given position based on the
+        weighted penalty of the monster and fire positions
+
+        Returns:
+            weighted_penalty (float): weighted penalty of the given position
+        """
 
         fire_penalty = 0
 
@@ -134,6 +173,20 @@ class CollectCoinThread(threading.Thread):
         return weighted_penalty
 
     def get_safe_pos(self, start_pos, epsilon=0.1, move_factor=0.05):
+        """function to get a safe position for the player to move to
+
+        Args:
+            start_pos (list): the current x and y position of the player on the
+            game screen
+            epsilon (float): threshold of taking a random move rather than the
+            safest move
+            move_factor (float): the amount by which the player moves
+
+
+        Returns:
+            safe_position (list): x and y coordinates of the calculated position
+            to move to
+        """
 
         _, monster_pos, fire_pos = position_func_v3()
 
@@ -174,9 +227,26 @@ class CollectCoinThread(threading.Thread):
         return safe_position
 
     def run(self):
+        """main function that determines the underlying logic for the coinAI
+        agent
+        - calculates the TSP and best route to collect coins given a starting
+        position
+        - calculates the risk_factor for the move logic based on the remaining
+        health
+        - calculates the safety threshold "" based on the remaining coins
+        - determines stalling behaviour based on both of the above factors
+        - includes a greedy override to collect all remaining coins in the route
+        if the player has enough health to do so
+        - checks for hit detection and moves to a safe position if the player is
+        in danger, moving to a guaranteed safe position if the player is
+        directly hit to avoid further damage
+        - calculates the execution time of the agent after the level is completed
+        """
+
         start_time = time.time()
         start_pos = [0.1, 0.1]
         app.start_char_animation(lvl_num, start_pos)
+        curr_screen = app.root.screens[lvl_num]
         coin_pos, monster_pos, fire_pos = position_func_v3()
         num_coins = len(coin_pos)
         tsp = self.create_tsp_matrix(
@@ -185,7 +255,7 @@ class CollectCoinThread(threading.Thread):
 
         init_coins = num_coins
 
-        while num_coins > 0:
+        while num_coins > 0 and curr_screen.character_killed is False:
 
             risk_factor = 0.1
 
@@ -217,6 +287,7 @@ class CollectCoinThread(threading.Thread):
                     print(f"damage taken, moving to: {new_pos}")
                     app.start_char_animation(lvl_num, new_pos)
                     start_pos = new_pos
+                    time.sleep(0.05)
 
                 tsp = self.create_tsp_matrix(
                     start_pos=start_pos)
@@ -245,6 +316,7 @@ class CollectCoinThread(threading.Thread):
                             start_pos, move_factor=0.05)
                         app.start_char_animation(lvl_num, new_pos)
                         start_pos = new_pos
+                        time.sleep(0.025)
 
                     stalling_penalty += risk_factor * \
                         math.log(max(1, stall_counter))
@@ -278,7 +350,7 @@ class CollectCoinThread(threading.Thread):
             start_pos = next_coin_pos
 
         end_time = time.time()
-        print(f"execution time: {end_time - start_time}")
+        print(f"execution time: {round(end_time - start_time, 4)}")
 
 
 def position_func_v3():  # added by Kit 03 July 2023
