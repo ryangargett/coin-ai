@@ -15,17 +15,21 @@ import kivy.base
 import random
 import time
 
-from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.algorithms.moo.dnsga2 import DNSGA2
 from pymoo.termination import get_termination
 from pymoo.core.problem import Problem
 from pymoo.optimize import minimize
+from pymoo.core.mutation import Mutation
 
 from multiprocessing import Pool
 
 import numpy as np
 
 INT_MAX = 2147483647
+
+
+class DiversityException(Exception):
+    pass
 
 
 def get_distance(pos1, pos2):
@@ -41,6 +45,77 @@ def get_distance(pos1, pos2):
 
     distance = np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
     return distance
+
+
+def get_algorithm(schema="maintain"):
+    """helper function to get the algorithm based on the requested diversity
+    schema"""
+
+    algorithm = None
+    if schema == "maintain":
+
+        algorithm = DNSGA2(
+            perc_detect_change=0.1,
+            perc_diversity=0.3,
+            pop_size=100,
+            eliminate_duplicates=True,
+            mutation=gIDGenerator()
+        )
+
+    elif schema == "increase":
+
+        algorithm = DNSGA2(
+            perc_detect_change=0.1,
+            perc_diversity=0.3,
+            pop_size=100,
+            eliminate_duplicates=True
+        )
+
+    elif schema == "multi":
+
+        pass
+
+    else:
+        raise ValueError(f"Requested diversity schema: {schema} not supported")
+
+    if algorithm is None:
+
+        print(f"Using default algorithm: NSGA2 (none)")
+
+        algorithm = NSGA2(
+            pop_size=100,
+            eliminate_duplicates=True
+        )
+
+    return algorithm
+
+
+class gIDGenerator(Mutation):
+
+    """Based on Generalized immigration schemes for dynamic evolutionary
+    multiobjective optimization: 10.1109/CEC.2011.5949865
+
+    Injects random instances into the population to maintain diversity,
+    determined by parameter theta.
+
+    Args:
+        theta (float): percentage of population to be replaced by random
+        instances [0, 1]
+
+    Returns:
+        population (Population): population with random instances injected
+    """
+
+    def __init__(self, theta=0.1):
+        super().__init__()
+        self.theta = theta
+
+    def _do(self, problem, X, **kwargs):
+        num_immigrants = int(self.theta * len(X))
+        for ii in range(num_immigrants):
+            X[ii] = np.random.uniform(problem.xl, problem.xu, problem.n_var)
+
+        return X
 
 
 class CoinProblem(Problem):
@@ -62,12 +137,8 @@ class CollectCoinThread(threading.Thread):
     def __init__(self, screen):
         super().__init__()
         self.screen = screen
-        self.algorithm = DNSGA2(
-            perc_detect_change=0.1,
-            perc_diversity=0.3,
-            pop_size=100,
-            eliminate_duplicates=True
-        )
+
+        self.algorithm = get_algorithm("maintain")
         self.solution_depth = get_termination("n_gen", 20)
 
     def get_new_position(self, coin_pos, enemy_pos):
