@@ -47,7 +47,29 @@ def get_distance(pos1, pos2):
     return distance
 
 
-def get_algorithm(schema="maintain"):
+def migrate(populations, migration_rate=0.1):
+    """helper function to migrate individuals between populations in a
+    multi-population schema. Populations are mutated in-place.
+
+    Args:
+        populations (list): list of populations to migrate individuals between
+    """
+
+    num_populations = len(populations)
+    population_size = len(populations[0].X)
+    num_migrants = int(migration_rate * population_size)
+
+    for ii, population in enumerate(populations):
+        migrants_idx = np.random.choice(population.X.shape[0], num_migrants, replace=False)
+        print(f"migrating the following individuals from population {ii}: {migrants_idx}")
+        migrants = population.X[migrants_idx]
+        sel_population = np.random.choice(range(num_populations))
+        to_replace = np.random.choice(population_size, num_migrants, replace=False)
+        print(f"replacing the following individuals in population {sel_population}: {to_replace}")
+        populations[sel_population].X[to_replace] = migrants
+
+
+def get_algorithm(schema="maintain", num_populations=3):
     """helper function to get the algorithm based on the requested diversity
     schema"""
 
@@ -73,10 +95,20 @@ def get_algorithm(schema="maintain"):
 
     elif schema == "multi":
 
-        pass
+        if num_populations < 2:
+            raise DiversityException("Number of populations must be greater than 1 for multi-diversity schema")
+
+        algorithm = [DNSGA2(
+            perc_detect_change=0.1,
+            perc_diversity=0.3,
+            pop_size=100,
+            eliminate_duplicates=True
+        ) for pop in range(num_populations)]
+
+        print(f"algorithm: {algorithm}")
 
     else:
-        raise ValueError(f"Requested diversity schema: {schema} not supported")
+        raise DiversityException(f"Requested diversity schema: {schema} not supported")
 
     if algorithm is None:
 
@@ -137,21 +169,46 @@ class CollectCoinThread(threading.Thread):
     def __init__(self, screen):
         super().__init__()
         self.screen = screen
-
-        self.algorithm = get_algorithm("maintain")
-        self.solution_depth = get_termination("n_gen", 20)
+        self.schema = "multi"
+        self.num_population = 3
+        self.algorithm = get_algorithm(self.schema, self.num_population)
+        self.solution_depth = get_termination("n_gen", 5)
 
     def get_new_position(self, coin_pos, enemy_pos):
 
         problem = CoinProblem(coin_pos, enemy_pos)
 
-        res = minimize(
-            problem,
-            self.algorithm,
-            termination=self.solution_depth,
-            seed=1,
-            verbose=True
-        )
+        if self.num_population == 1:
+
+            res = minimize(
+                problem,
+                self.algorithm,
+                termination=self.solution_depth,
+                seed=1,
+                verbose=True
+            )
+
+            print(f"res: {res}")
+
+        else:
+
+            global_results = []
+
+            for population in self.algorithm:
+
+                res = minimize(
+                    problem,
+                    population,
+                    termination=self.solution_depth,
+                    seed=1,
+                    verbose=True,
+                    return_least_infeasible=True
+                )
+
+                global_results.append(res)
+
+            migrate(global_results)
+            res = min(global_results, key=lambda x: np.min(x.F[:, 0] - x.F[:, 1]))
 
         best_idx = np.argmin(res.F[:, 0] - res.F[:, 1])
         best_pos = res.X[best_idx].tolist()
