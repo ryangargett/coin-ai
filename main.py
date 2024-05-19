@@ -49,7 +49,8 @@ def get_distance(pos1, pos2):
 
 def migrate(populations, migration_rate=0.1):
     """helper function to migrate individuals between populations in a
-    multi-population schema. Populations are mutated in-place.
+    multi-population schema. Populations are mutated in-place. Check added to
+    ensure that migrated individuals must be transmitted to a different population.
 
     Args:
         populations (list): list of populations to migrate individuals between
@@ -60,12 +61,15 @@ def migrate(populations, migration_rate=0.1):
     num_migrants = int(migration_rate * population_size)
 
     for ii, population in enumerate(populations):
+
         migrants_idx = np.random.choice(population.X.shape[0], num_migrants, replace=False)
         print(f"migrating the following individuals from population {ii}: {migrants_idx}")
         migrants = population.X[migrants_idx]
-        sel_population = np.random.choice(range(num_populations))
+
+        sel_population = np.random.choice([pop for pop in range(num_populations) if pop != ii])
         to_replace = np.random.choice(population_size, num_migrants, replace=False)
         print(f"replacing the following individuals in population {sel_population}: {to_replace}")
+
         populations[sel_population].X[to_replace] = migrants
 
 
