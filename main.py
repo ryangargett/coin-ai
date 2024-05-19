@@ -16,12 +16,11 @@ import random
 import time
 
 from pymoo.algorithms.moo.dnsga2 import DNSGA2
+from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.termination import get_termination
 from pymoo.core.problem import Problem
 from pymoo.optimize import minimize
 from pymoo.core.mutation import Mutation
-
-from multiprocessing import Pool
 
 import numpy as np
 
@@ -45,85 +44,6 @@ def get_distance(pos1, pos2):
 
     distance = np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
     return distance
-
-
-def migrate(populations, migration_rate=0.1):
-    """helper function to migrate individuals between populations in a
-    multi-population schema. Populations are mutated in-place. Check added to
-    ensure that migrated individuals must be transmitted to a different population.
-
-    Args:
-        populations (list): list of populations to migrate individuals between
-    """
-
-    num_populations = len(populations)
-    population_size = len(populations[0].X)
-    num_migrants = int(migration_rate * population_size)
-
-    for ii, population in enumerate(populations):
-
-        migrants_idx = np.random.choice(population.X.shape[0], num_migrants, replace=False)
-        print(f"migrating the following individuals from population {ii}: {migrants_idx}")
-        migrants = population.X[migrants_idx]
-
-        sel_population = np.random.choice([pop for pop in range(num_populations) if pop != ii])
-        to_replace = np.random.choice(population_size, num_migrants, replace=False)
-        print(f"replacing the following individuals in population {sel_population}: {to_replace}")
-
-        populations[sel_population].X[to_replace] = migrants
-
-
-def get_algorithm(schema="maintain", num_populations=3):
-    """helper function to get the algorithm based on the requested diversity
-    schema"""
-
-    algorithm = None
-    if schema == "maintain":
-
-        algorithm = DNSGA2(
-            perc_detect_change=0.1,
-            perc_diversity=0.3,
-            pop_size=100,
-            eliminate_duplicates=True,
-            mutation=gIDGenerator()
-        )
-
-    elif schema == "increase":
-
-        algorithm = DNSGA2(
-            perc_detect_change=0.1,
-            perc_diversity=0.3,
-            pop_size=100,
-            eliminate_duplicates=True
-        )
-
-    elif schema == "multi":
-
-        if num_populations < 2:
-            raise DiversityException("Number of populations must be greater than 1 for multi-diversity schema")
-
-        algorithm = [DNSGA2(
-            perc_detect_change=0.1,
-            perc_diversity=0.3,
-            pop_size=100,
-            eliminate_duplicates=True
-        ) for pop in range(num_populations)]
-
-        print(f"algorithm: {algorithm}")
-
-    else:
-        raise DiversityException(f"Requested diversity schema: {schema} not supported")
-
-    if algorithm is None:
-
-        print(f"Using default algorithm: NSGA2 (none)")
-
-        algorithm = NSGA2(
-            pop_size=100,
-            eliminate_duplicates=True
-        )
-
-    return algorithm
 
 
 class gIDGenerator(Mutation):
@@ -157,14 +77,17 @@ class gIDGenerator(Mutation):
 class CoinProblem(Problem):
     def __init__(self, coin_pos, enemy_pos):
         super().__init__(n_var=2, n_obj=2, n_constr=0, xl=np.array([0, 0]), xu=np.array([1, 1]))
+
         self.coin_pos = coin_pos
         self.enemy_pos = enemy_pos
 
     def _evaluate(self, x, out):
         coin_distances = np.array([np.min([get_distance(pos, x[i]) for pos in self.coin_pos])
                                   for i in range(x.shape[0])])
+
         enemy_distances = np.array([np.max([get_distance(pos, x[i]) for pos in self.enemy_pos])
                                    for i in range(x.shape[0])])
+
         out["F"] = np.column_stack([coin_distances, -enemy_distances])
 
 
@@ -173,10 +96,86 @@ class CollectCoinThread(threading.Thread):
     def __init__(self, screen):
         super().__init__()
         self.screen = screen
-        self.schema = "multi"
-        self.num_population = 3
-        self.algorithm = get_algorithm(self.schema, self.num_population)
-        self.solution_depth = get_termination("n_gen", 5)
+        self.schema = "maintain"
+        self.num_population = 1
+        self.population = None
+
+        self.migration_rate = 0.1
+        self.solution_depth = get_termination("n_gen", 50)
+
+        self.get_population_schema()
+
+    def migrate(self, populations):
+        """helper function to migrate individuals between populations in a
+        multi-population schema. Populations are mutated in-place. Check added to
+        ensure that migrated individuals must be transmitted to a different population.
+
+        Args:
+            populations (list): list of populations to migrate individuals between
+        """
+        population_size = len(populations[0].X)
+        num_migrants = int(self.migration_rate * population_size)
+
+        for ii, population in enumerate(populations):
+
+            migrants_idx = np.random.choice(population.X.shape[0], num_migrants, replace=False)
+            print(f"migrating the following individuals from population {ii}: {migrants_idx}")
+            migrants = population.X[migrants_idx]
+
+            sel_population = np.random.choice([pop for pop in range(self.num_population) if pop != ii])
+            to_replace = np.random.choice(population_size, num_migrants, replace=False)
+            print(f"replacing the following individuals in population {sel_population}: {to_replace}")
+
+            populations[sel_population].X[to_replace] = migrants
+
+    def get_population_schema(self):
+        """helper function to get the population based on the requested diversity
+        schema"""
+
+        if self.schema == "maintain":
+
+            self.population = DNSGA2(
+                perc_detect_change=0.1,
+                perc_diversity=0.3,
+                pop_size=100,
+                eliminate_duplicates=True,
+                mutation=gIDGenerator()
+            )
+
+        elif self.schema == "increase":
+
+            self.population = DNSGA2(
+                perc_detect_change=0.1,
+                perc_diversity=0.3,
+                pop_size=100,
+                eliminate_duplicates=True
+            )
+
+        elif self.schema == "multi":
+
+            if self.num_population < 2:
+                raise DiversityException("Number of populations must be greater than 1 for multi-diversity schema")
+
+            self.population = [DNSGA2(
+                perc_detect_change=0.1,
+                perc_diversity=0.3,
+                pop_size=100,
+                eliminate_duplicates=True
+            ) for pop in range(self.num_population)]
+
+            print(f"population: {self.population}")
+
+        else:
+            raise DiversityException(f"Requested diversity schema: {self.schema} not supported")
+
+        if self.population is None:
+
+            print(f"Using default population: NSGA2 (none)")
+
+            self.population = NSGA2(
+                pop_size=100,
+                eliminate_duplicates=True
+            )
 
     def get_new_position(self, coin_pos, enemy_pos):
 
@@ -186,32 +185,28 @@ class CollectCoinThread(threading.Thread):
 
             res = minimize(
                 problem,
-                self.algorithm,
+                self.population,
                 termination=self.solution_depth,
                 seed=1,
                 verbose=True
             )
 
-            print(f"res: {res}")
-
         else:
 
             global_results = []
-
-            for population in self.algorithm:
+            for population in self.population:
 
                 res = minimize(
                     problem,
                     population,
                     termination=self.solution_depth,
                     seed=1,
-                    verbose=True,
-                    return_least_infeasible=True
+                    verbose=True
                 )
 
                 global_results.append(res)
 
-            migrate(global_results)
+            self.migrate(global_results)
             res = min(global_results, key=lambda x: np.min(x.F[:, 0] - x.F[:, 1]))
 
         best_idx = np.argmin(res.F[:, 0] - res.F[:, 1])
@@ -232,9 +227,6 @@ class CollectCoinThread(threading.Thread):
         enemy_pos = monster_pos + fire_pos
         print(f"enemy positions: {enemy_pos}")
         num_coins = len(coin_pos)
-
-        # domains = app.calculate_domains(coin_pos, lvl_num, 0.1)
-        print("running....")
 
         while num_coins > 0 and curr_screen.character_killed is False:
             best_pos = self.get_new_position(coin_pos, enemy_pos)
