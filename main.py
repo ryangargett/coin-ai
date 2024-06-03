@@ -14,9 +14,6 @@ import threading
 import kivy.base
 import random
 import time
-import math
-
-import atexit
 
 from pymoo.algorithms.moo.dnsga2 import DNSGA2
 from pymoo.algorithms.moo.nsga2 import NSGA2
