@@ -14,6 +14,9 @@ import threading
 import kivy.base
 import random
 import time
+import math
+
+import atexit
 
 from pymoo.algorithms.moo.dnsga2 import DNSGA2
 from pymoo.algorithms.moo.nsga2 import NSGA2
@@ -55,21 +58,30 @@ class gIDGenerator(Mutation):
     determined by parameter theta.
 
     Args:
-        theta (float): percentage of population to be replaced by random
-        instances [0, 1]
+        alpha (float): percentage of population to be replaced by random
+        instances (immigration rate) [0, 1]
 
     Returns:
         population (Population): population with random instances injected
     """
 
-    def __init__(self, theta=0.1):
+    def __init__(self, alpha=0.1):
         super().__init__()
-        self.theta = theta
+        self.alpha = alpha
 
     def _do(self, problem, X, **kwargs):
-        num_immigrants = int(self.theta * len(X))
+        num_immigrants = int(self.alpha * len(X))
+
+        # Calculate the fitness values for the population
+        fitness_values = problem.evaluate(X)
+
+        # Sort the population based on their fitness values in descending order
+        sorted_indices = np.argsort(fitness_values)[::-1]
+
+        # Replace the K worst solutions with random instances
         for ii in range(num_immigrants):
-            X[ii] = np.random.uniform(problem.xl, problem.xu, problem.n_var)
+            worst_index = sorted_indices[ii]
+            X[worst_index] = np.random.uniform(problem.xl, problem.xu, problem.n_var)
 
         return X
 
@@ -82,13 +94,15 @@ class CoinProblem(Problem):
         self.enemy_pos = enemy_pos
 
     def _evaluate(self, x, out):
-        coin_distances = np.array([np.min([get_distance(pos, x[i]) for pos in self.coin_pos])
-                                  for i in range(x.shape[0])])
 
-        enemy_distances = np.array([np.max([get_distance(pos, x[i]) for pos in self.enemy_pos])
+        coin_distances = np.array([np.min([get_distance(pos, x[i]) for pos in self.coin_pos])
                                    for i in range(x.shape[0])])
 
-        out["F"] = np.column_stack([coin_distances, -enemy_distances])
+        # Calculate the penalty for each enemy using an inverse cube root law
+        enemy_penalties = np.array([np.sum([1 / get_distance(pos, x[i])**(1/3) for pos in self.enemy_pos])
+                                    for i in range(x.shape[0])])
+
+        out["F"] = np.column_stack([coin_distances, -enemy_penalties])
 
 
 class CollectCoinThread(threading.Thread):
@@ -96,19 +110,30 @@ class CollectCoinThread(threading.Thread):
     def __init__(self, screen):
         super().__init__()
         self.screen = screen
-        self.schema = "maintain"
-        self.num_population = 1
+        self.schema = "multi"
+        self.num_population = 3
         self.population = None
-
+        self.sub_pop_size = 50
         self.migration_rate = 0.1
-        self.solution_depth = get_termination("n_gen", 50)
+        self.solution_depth = get_termination("n_gen", 20)
 
         self.get_population_schema()
 
+    def save_population(self, fname):
+
+        if self.num_population > 1:
+            for pop, ii in zip(self.population, range(self.num_population)):
+                fname = f"{fname}_{ii}"
+                with open(fname, 'wb') as f:
+                    pickle.dump(pop, f)
+
+        else:
+            with open(fname, 'wb') as f:
+                pickle.dump(self.population, f)
+
     def migrate(self, populations):
         """helper function to migrate individuals between populations in a
-        multi-population schema. Populations are mutated in-place. Check added to
-        ensure that migrated individuals must be transmitted to a different population.
+        multi-population schema with a ring topology. Populations are mutated in-place.
 
         Args:
             populations (list): list of populations to migrate individuals between
@@ -122,7 +147,7 @@ class CollectCoinThread(threading.Thread):
             print(f"migrating the following individuals from population {ii}: {migrants_idx}")
             migrants = population.X[migrants_idx]
 
-            sel_population = np.random.choice([pop for pop in range(self.num_population) if pop != ii])
+            sel_population = (ii + 1) % self.num_population
             to_replace = np.random.choice(population_size, num_migrants, replace=False)
             print(f"replacing the following individuals in population {sel_population}: {to_replace}")
 
@@ -132,46 +157,42 @@ class CollectCoinThread(threading.Thread):
         """helper function to get the population based on the requested diversity
         schema"""
 
-        if self.schema == "maintain":
+        try:
+            if self.schema == "maintain":
 
-            self.population = DNSGA2(
-                perc_detect_change=0.1,
-                perc_diversity=0.3,
-                pop_size=100,
-                eliminate_duplicates=True,
-                mutation=gIDGenerator()
-            )
+                self.population = NSGA2(
+                    pop_size=100,
+                    eliminate_duplicates=True,
+                    mutation=gIDGenerator()
+                )
 
-        elif self.schema == "increase":
+            elif self.schema == "increase":
 
-            self.population = DNSGA2(
-                perc_detect_change=0.1,
-                perc_diversity=0.3,
-                pop_size=100,
-                eliminate_duplicates=True
-            )
+                self.population = DNSGA2(
+                    perc_detect_change=0.1,
+                    pop_size=100,
+                    eliminate_duplicates=True
+                )
 
-        elif self.schema == "multi":
+            elif self.schema == "multi":
 
-            if self.num_population < 2:
-                raise DiversityException("Number of populations must be greater than 1 for multi-diversity schema")
+                if self.num_population < 2:
+                    raise DiversityException("Number of populations must be greater than 1 for multi-diversity schema")
 
-            self.population = [DNSGA2(
-                perc_detect_change=0.1,
-                perc_diversity=0.3,
-                pop_size=100,
-                eliminate_duplicates=True
-            ) for pop in range(self.num_population)]
+                self.population = [NSGA2(
+                    pop_size=self.sub_pop_size,
+                    eliminate_duplicates=True
+                ) for pop in range(self.num_population)]
 
-            print(f"population: {self.population}")
+                print(f"population: {self.population}")
 
-        else:
-            raise DiversityException(f"Requested diversity schema: {self.schema} not supported")
+            else:
+                raise DiversityException(f"Requested diversity schema: {self.schema} not supported")
+
+        except DiversityException as e:
+            print(e)
 
         if self.population is None:
-
-            print(f"Using default population: NSGA2 (none)")
-
             self.population = NSGA2(
                 pop_size=100,
                 eliminate_duplicates=True
@@ -217,26 +238,20 @@ class CollectCoinThread(threading.Thread):
 
     def run(self):
 
-        start_time = time.time()
         start_pos = [0.1, 0.1]
         app.start_char_animation(lvl_num, start_pos)
         curr_screen = app.root.screens[lvl_num]
         coin_pos, monster_pos, fire_pos = position_func_v3()
-        print(f"enemy positions: {monster_pos}")
-        print(f"fire positions: {fire_pos}")
         enemy_pos = monster_pos + fire_pos
-        print(f"enemy positions: {enemy_pos}")
         num_coins = len(coin_pos)
 
-        while num_coins > 0 and curr_screen.character_killed is False:
-            best_pos = self.get_new_position(coin_pos, enemy_pos)
-            app.start_char_animation(lvl_num, best_pos)
-            coin_pos, monster_pos, fire_pos = position_func_v3()
-            enemy_pos = monster_pos + fire_pos
-            num_coins = len(coin_pos)
-
-        end_time = time.time()
-        print(f"execution time: {round(end_time - start_time, 4)}")
+        if self.population is not None:
+            while num_coins > 0 and curr_screen.character_killed is False:
+                best_pos = self.get_new_position(coin_pos, enemy_pos)
+                app.start_char_animation(lvl_num, best_pos)
+                coin_pos, monster_pos, fire_pos = position_func_v3()
+                enemy_pos = monster_pos + fire_pos
+                num_coins = len(coin_pos)
 
 
 def position_func_v3():  # added by Kit 03 July 2023
@@ -274,6 +289,10 @@ def position_func_v3():  # added by Kit 03 July 2023
 
 
 class CointexApp(kivy.app.App):
+
+    def _init_(self):
+        self.start_time = None
+        self.end_time = None
 
     def on_start(self):
         music_dir = os.getcwd()+"/music/"
@@ -362,36 +381,8 @@ class CointexApp(kivy.app.App):
                             str(screen_num)].add_widget(coin, index=-1)
             curr_screen.coins_ids['coin'+str(k)] = coin
 
-            Clock.schedule_once(self.get_draw_rectangle_function(coin), 0)
-
-    def calculate_domains(self, coin_pos, screen_num, size, show_domain=True):
-        curr_screen = self.root.screens[screen_num]
-        valid_positions = []
-
-        window_x = Window.size[0]
-        window_y = Window.size[1]
-
-        corrected_size = (Window.size[0] * size) / 2
-
-        for pos in coin_pos:
-            legal_x = [x / window_x for x in range(int(pos[0] - corrected_size), int(pos[0] + corrected_size))]
-            legal_y = [y / window_y for y in range(int(pos[1] - corrected_size), int(pos[1] + corrected_size))]
-            valid_positions.extend([(x, y) for x in legal_x for y in legal_y])
-
-        print(len(legal_x), len(legal_y))
-
-    def get_draw_rectangle_function(self, coin):
-        # This function captures coin by value
-        def draw_rectangle(dt):
-            with coin.canvas:
-                Color(0, 1, 0, 0.5)  # Set the color of the neighbourhood (green in this case)
-                # Set the rectangle size to be 10% of the window size
-                rect_size = (Window.size[0] * 0.1, Window.size[1] * 0.1)
-                Rectangle(pos=(coin.center_x - rect_size[0] / 2, coin.center_y - rect_size[1] / 2),
-                          size=rect_size)
-        return draw_rectangle
-
     def screen_on_enter(self, screen_num):
+        self.start_time = time.time()
         music_dir = os.getcwd()+"/music/"
         self.bg_music = kivy.core.audio.SoundLoader.load(
             music_dir+"bg_music_piano.wav")
@@ -540,6 +531,8 @@ class CointexApp(kivy.app.App):
                 curr_screen.ids['num_coins_collected_lvl'+str(screen_num)].text = "Coins "+str(
                     curr_screen.num_coins_collected)+"/"+str(curr_screen.num_coins)
                 if curr_screen.num_coins_collected == curr_screen.num_coins:
+                    self.end_time = time.time()
+                    print(f"execution time: {round(self.end_time - self.start_time, 4)}")
                     self.bg_music.stop()
                     self.level_completed_sound.play()
                     kivy.clock.Clock.schedule_once(functools.partial(
