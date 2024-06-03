@@ -67,15 +67,12 @@ class gIDGenerator(Mutation):
         self.alpha = alpha
 
     def _do(self, problem, X, **kwargs):
+
         num_immigrants = int(self.alpha * len(X))
 
-        # Calculate the fitness values for the population
         fitness_values = problem.evaluate(X)
-
-        # Sort the population based on their fitness values in descending order
         sorted_indices = np.argsort(fitness_values)[::-1]
 
-        # Replace the K worst solutions with random instances
         for ii in range(num_immigrants):
             worst_index = sorted_indices[ii]
             X[worst_index] = np.random.uniform(problem.xl, problem.xu, problem.n_var)
@@ -135,6 +132,7 @@ class CollectCoinThread(threading.Thread):
         Args:
             populations (list): list of populations to migrate individuals between
         """
+
         population_size = len(populations[0].X)
         num_migrants = int(self.migration_rate * population_size)
 
@@ -152,7 +150,8 @@ class CollectCoinThread(threading.Thread):
 
     def get_population_schema(self):
         """helper function to get the population based on the requested diversity
-        schema"""
+        schema, if an invalid schema is returned, a default NSGA-II population
+        with no schema is constructed"""
 
         try:
             if self.schema == "maintain":
@@ -196,6 +195,18 @@ class CollectCoinThread(threading.Thread):
             )
 
     def get_new_position(self, coin_pos, enemy_pos):
+        """Determines the best position of the player agent to move towards
+        based on the solution with best fitness values provided by the genetic
+        population(s), also checks to see whether a multi-population schema is
+        being used, in which case the population with best solution is selected,
+        before performing genetic migration
+
+        Returns:
+            coin_pos (list): a list of x and y coordinates for all coins still
+            present in the gamespace
+            enemy_pos (list): a list of x and y coordinates for all hazards
+            (fires and enemies) in the gamespace
+        """
 
         problem = CoinProblem(coin_pos, enemy_pos)
 
