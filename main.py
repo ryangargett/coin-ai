@@ -104,8 +104,8 @@ class CollectCoinThread(threading.Thread):
     def __init__(self, screen):
         super().__init__()
         self.screen = screen
-        self.schema = "multi"
-        self.num_population = 3
+        self.schema = "none"
+        self.num_population = 1
         self.population = None
         self.sub_pop_size = 50
         self.migration_rate = 0.1
